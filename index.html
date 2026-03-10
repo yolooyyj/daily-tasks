@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>工作台</title>
+  <meta name="theme-color" content="#111827"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-title" content="工作台"/>
+  <link rel="manifest" id="manifest-placeholder"/>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700;900&display=swap" rel="stylesheet"/>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{font-family:'Noto Sans SC','PingFang SC',sans-serif;background:#fafaf8;min-height:100vh;}
+    button,textarea,input{font-family:inherit;}
+    @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+    @keyframes slideIn{from{transform:translateX(100%)}to{transform:translateX(0)}}
+    @keyframes noteSlideIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+    .drawer-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.25);z-index:40;animation:fadeIn 0.2s ease;}
+    .drawer{position:fixed;right:0;top:0;bottom:0;width:min(420px,100vw);background:#fff;z-index:50;box-shadow:-4px 0 24px rgba(0,0,0,0.08);display:flex;flex-direction:column;animation:slideIn 0.25s ease;}
+    .drag-handle{cursor:grab;padding:2px 4px;color:#d1d5db;display:flex;flex-direction:column;gap:3px;align-self:center;flex-shrink:0;touch-action:none;user-select:none;}
+    .drag-handle:active{cursor:grabbing;}
+    .drag-dot-row{display:flex;gap:3px;}
+    .drag-dot{width:3px;height:3px;border-radius:50%;background:currentColor;}
+    .task-card{background:#fff;border:1.5px solid #e5e7eb;border-radius:12px;padding:14px 16px;display:flex;align-items:flex-start;gap:12px;transition:all 0.15s;}
+    .task-card.done{background:#f9fafb;border-color:#f3f4f6;opacity:0.7;}
+    .task-card.dragging{background:#f0f9ff;border:1.5px dashed #93c5fd;opacity:0.5;}
+    .task-card.drag-over{border-color:#374151;transform:translateY(-2px);}
+    .note-card{background:#fff;border:1.5px solid #e5e7eb;border-radius:12px;padding:16px;cursor:pointer;transition:all 0.15s;animation:noteSlideIn 0.2s ease;}
+    .note-card:hover{border-color:#d1d5db;box-shadow:0 2px 8px rgba(0,0,0,0.05);}
+    .tab-btn{padding:8px 20px;border-radius:20px;border:none;font-size:14px;font-weight:500;cursor:pointer;transition:all 0.15s;}
+    .tab-btn.active{background:#111827;color:#fff;}
+    .tab-btn.inactive{background:transparent;color:#6b7280;}
+    textarea:focus{outline:none;}
+    input[type=date]{font-family:inherit;}
+    ::-webkit-scrollbar{width:4px;}
+    ::-webkit-scrollbar-track{background:transparent;}
+    ::-webkit-scrollbar-thumb{background:#e5e7eb;border-radius:99px;}
+  </style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+// ── Manifest ──────────────────────────────────────────────────────────────────
+const manifest={name:"工作台",short_name:"工作台",description:"每日任务与笔记",start_url:".",display:"standalone",background_color:"#fafaf8",theme_color:"#111827",icons:[{src:"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%23111827'/%3E%3Ctext y='.9em' font-size='70' x='10'%3E📋%3C/text%3E%3C/svg%3E",sizes:"192x192",type:"image/svg+xml"}]};
+const blob=new Blob([JSON.stringify(manifest)],{type:'application/json'});
+document.getElementById('manifest-placeholder').href=URL.createObjectURL(blob);
+
+// ── Storage ───────────────────────────────────────────────────────────────────
+const TASK_KEY='daily-tasks-v1', NOTE_KEY='daily-notes-v1';
+function loadTasks(){try{return JSON.parse(localStorage.getItem(TASK_KEY)||'{}')}catch{return{}}}
+function saveTasks(d){try{localStorage.setItem(TASK_KEY,JSON.stringify(d))}catch{}}
+function loadNotes(){try{return JSON.parse(localStorage.getItem(NOTE_KEY)||'{}')}catch{return{}}}
+function saveNotes(d){try{localStorage.setItem(NOTE_KEY,JSON.stringify(d))}catch{}}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const toKey=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+const getTodayKey=()=>toKey(new Date());
+const keyToDate=k=>{const[y,m,d]=k.split('-').map(Number);return new Date(y,m-1,d)};
+const shiftDay=(k,delta)=>{const d=keyToDate(k);d.setDate(d.getDate()+delta);return toKey(d)};
+const formatKey=k=>{const d=keyToDate(k);const days=['星期日','星期一','星期二','星期三','星期四','星期五','星期六'];return{month:d.getMonth()+1,day:d.getDate(),weekday:days[d.getDay()],year:d.getFullYear()}};
+const getPriority=p=>p==='high'?{label:'紧急',color:'#ef4444',bg:'#fef2f2'}:p==='mid'?{label:'普通',color:'#f59e0b',bg:'#fffbeb'}:{label:'低优',color:'#6b7280',bg:'#f9fafb'};
+const timeNow=()=>new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
+const uid=()=>Date.now()+Math.random();
+const esc=s=>(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let allTasks=loadTasks(), allNotes=loadNotes();
+let viewKey=getTodayKey();
+let activeTab='tasks'; // 'tasks' | 'notes'
+let taskFilter='all';
+let selectedTask=null;
+let showDatePicker=false;
+let inputText='', inputPriority='mid';
+let dragState=null;
+// Note state
+let selectedNote=null;  // note being edited in drawer
+let noteDrawerText='', noteDrawerTitle='';
+
+// ── Carry-over ────────────────────────────────────────────────────────────────
+(function carryOver(){
+  const todayKey=getTodayKey();
+  const pastKeys=Object.keys(allTasks).filter(k=>k<todayKey).sort();
+  let todayTasks=allTasks[todayKey]||[];
+  let changed=false;
+  for(const key of pastKeys){
+    for(const t of(allTasks[key]||[]).filter(t=>!t.done&&!t.carriedFrom)){
+      if(!todayTasks.some(tt=>tt.originalId===t.id||tt.id===t.id)){
+        todayTasks.push({...t,id:uid(),originalId:t.id,carriedFrom:key});
+        changed=true;
+      }
+    }
+  }
+  if(changed){allTasks[todayKey]=todayTasks;saveTasks(allTasks);}
+})();
+
+// ── Render ────────────────────────────────────────────────────────────────────
+function render(){
+  const todayKey=getTodayKey();
+  const isToday=viewKey===todayKey;
+  const tasks=allTasks[viewKey]||[];
+  const notes=allNotes[viewKey]||[];
+  const {month,day,weekday,year}=formatKey(viewKey);
+  const filtered=tasks.filter(t=>taskFilter==='todo'?!t.done:taskFilter==='done'?t.done:true);
+  const doneCount=tasks.filter(t=>t.done).length;
+  const progress=tasks.length?Math.round(doneCount/tasks.length*100):0;
+  const canGoNext=shiftDay(viewKey,1)<=todayKey;
+
+  document.getElementById('app').innerHTML=`
+  <div style="max-width:600px;margin:0 auto;padding:0 20px 60px;">
+
+    <!-- DATE HEADER -->
+    <div style="padding:32px 0 20px;border-bottom:1.5px solid #f0f0ee;margin-bottom:0;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+        <button id="btn-prev" style="width:34px;height:34px;border-radius:10px;border:1.5px solid #e5e7eb;background:#fff;cursor:pointer;font-size:16px;color:#374151;">‹</button>
+        <div style="display:flex;align-items:center;gap:8px;">
+          ${!isToday?`<button id="btn-today" style="padding:4px 12px;border-radius:20px;border:1.5px solid #111827;background:transparent;color:#111827;font-size:12px;font-weight:600;cursor:pointer;">回到今天</button>`:''}
+          <button id="btn-datepicker" style="padding:4px 12px;border-radius:20px;border:1.5px solid #e5e7eb;background:#fff;color:#6b7280;font-size:12px;font-weight:500;cursor:pointer;">选择日期</button>
+        </div>
+        <button id="btn-next" style="width:34px;height:34px;border-radius:10px;border:1.5px solid #e5e7eb;background:${canGoNext?'#fff':'#f9fafb'};cursor:${canGoNext?'pointer':'default'};font-size:16px;color:${canGoNext?'#374151':'#d1d5db'};">›</button>
+      </div>
+
+      ${showDatePicker?`<div style="margin-bottom:14px;"><input id="date-input" type="date" max="${todayKey}" value="${viewKey}" style="width:100%;padding:8px 12px;border-radius:10px;border:1.5px solid #374151;font-size:14px;outline:none;background:#fff;"/></div>`:''}
+
+      <div style="display:flex;align-items:flex-end;gap:12px;margin-bottom:16px;">
+        <div>
+          <div style="font-size:11px;color:#9ca3af;letter-spacing:2px;margin-bottom:2px;">${year}年</div>
+          <div style="display:flex;align-items:baseline;gap:6px;">
+            <span style="font-size:64px;font-weight:900;color:#111827;line-height:1;letter-spacing:-3px;">${day}</span>
+            <span style="font-size:22px;font-weight:700;color:#374151;padding-bottom:6px;">/ ${month}月</span>
+          </div>
+        </div>
+        <div style="padding-bottom:8px;">
+          <div style="display:inline-block;padding:4px 12px;border-radius:20px;background:${isToday?'#111827':'#f3f4f6'};color:${isToday?'#fff':'#6b7280'};font-size:13px;font-weight:600;">${isToday?'今天 · ':''}${weekday}</div>
+        </div>
+      </div>
+
+      <!-- TABS -->
+      <div style="display:flex;gap:4px;border-bottom:1.5px solid #f0f0ee;padding-bottom:0;margin-bottom:0;">
+        <button class="tab-btn ${activeTab==='tasks'?'active':'inactive'}" id="tab-tasks" style="border-radius:10px 10px 0 0;padding:8px 20px;">
+          ✓ 任务${tasks.length>0?` <span style="font-size:11px;opacity:0.6;">${doneCount}/${tasks.length}</span>`:''}
+        </button>
+        <button class="tab-btn ${activeTab==='notes'?'active':'inactive'}" id="tab-notes" style="border-radius:10px 10px 0 0;padding:8px 20px;">
+          📝 笔记${notes.length>0?` <span style="font-size:11px;opacity:0.6;">${notes.length}</span>`:''}
+        </button>
+      </div>
+    </div>
+
+    <!-- PROGRESS (tasks tab only) -->
+    ${activeTab==='tasks'&&tasks.length>0?`
+    <div style="padding:14px 0 0;">
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+        <span style="font-size:12px;color:#9ca3af;">${doneCount===tasks.length?'🎉 全部完成！':`还剩 ${tasks.length-doneCount} 项`}</span>
+        <span style="font-size:12px;font-weight:600;color:${progress===100?'#10b981':'#374151'};">${doneCount}/${tasks.length}　${progress}%</span>
+      </div>
+      <div style="height:4px;background:#f0f0ee;border-radius:99px;overflow:hidden;">
+        <div style="height:100%;width:${progress}%;background:${progress===100?'#10b981':'#374151'};border-radius:99px;transition:width 0.4s ease;"></div>
+      </div>
+    </div>`:'<div style="padding-top:4px;"></div>'}
+
+    <!-- ══ TASKS TAB ══ -->
+    ${activeTab==='tasks'?`
+    <div style="margin-top:20px;">
+      ${isToday?`
+      <div style="background:#fff;border:1.5px solid #e5e7eb;border-radius:14px;padding:16px;margin-bottom:20px;box-shadow:0 1px 4px rgba(0,0,0,0.04);">
+        <textarea id="task-input" placeholder="添加今天的新任务… (Enter 确认)" rows="2"
+          style="width:100%;border:none;outline:none;resize:none;font-size:15px;color:#111827;background:transparent;line-height:1.6;">${esc(inputText)}</textarea>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:10px;">
+          <div style="display:flex;gap:6px;">
+            ${['high','mid','low'].map(p=>{const{label,color}=getPriority(p);const a=inputPriority===p;return`<button class="prio-btn" data-p="${p}" style="padding:4px 10px;border-radius:20px;border:1.5px solid ${a?color:'#e5e7eb'};background:${a?color:'#fff'};color:${a?'#fff':'#6b7280'};font-size:12px;font-weight:500;cursor:pointer;">${label}</button>`;}).join('')}
+          </div>
+          <button id="btn-add" style="padding:6px 18px;border-radius:20px;border:none;background:#111827;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">添加</button>
+        </div>
+      </div>`:`
+      <div style="background:#fffbeb;border:1.5px solid #fde68a;border-radius:12px;padding:10px 14px;margin-bottom:16px;font-size:13px;color:#92400e;">
+        📅 查看 <b>${month}月${day}日</b> 历史任务，切换到今天才能添加
+      </div>`}
+
+      ${tasks.length>0?`
+      <div style="display:flex;gap:4px;margin-bottom:14px;">
+        ${[['all','全部'],['todo','待完成'],['done','已完成']].map(([v,l])=>`<button class="filter-btn" data-f="${v}" style="padding:5px 14px;border-radius:20px;border:none;background:${taskFilter===v?'#111827':'transparent'};color:${taskFilter===v?'#fff':'#6b7280'};font-size:13px;font-weight:500;cursor:pointer;">${l}</button>`).join('')}
+        ${doneCount>0&&isToday?`<button id="btn-clear" style="margin-left:auto;padding:5px 14px;border-radius:20px;border:1.5px solid #fca5a5;background:transparent;color:#ef4444;font-size:13px;font-weight:500;cursor:pointer;">清除已完成</button>`:''}
+      </div>`:''}
+
+      <div id="task-list" style="display:flex;flex-direction:column;gap:8px;">
+        ${filtered.length===0?`<div style="text-align:center;color:#d1d5db;padding:48px 0;font-size:14px;">${tasks.length===0?(isToday?'还没有任务，在上面添加一个吧 ✏️':'这天没有任务记录'):'没有符合条件的任务'}</div>`:''}
+        ${filtered.map(task=>{
+          const{color,bg}=getPriority(task.priority);
+          const hasNotes=task.notes&&task.notes.trim();
+          const realIndex=tasks.findIndex(t=>t.id===task.id);
+          const isDragging=dragState?.id===task.id;
+          const isOver=dragState&&!isDragging&&realIndex===dragState.overIndex;
+          return`<div class="task-card${task.done?' done':''}${isDragging?' dragging':''}${isOver?' drag-over':''}" data-id="${task.id}" data-idx="${realIndex}">
+            ${isToday&&taskFilter==='all'?`<div class="drag-handle" data-drag="${task.id}">${[0,1,2].map(()=>`<div class="drag-dot-row"><div class="drag-dot"></div><div class="drag-dot"></div></div>`).join('')}</div>`:''}
+            <button class="check-btn" data-id="${task.id}" style="width:22px;height:22px;border-radius:6px;flex-shrink:0;border:2px solid ${task.done?'#10b981':'#d1d5db'};background:${task.done?'#10b981':'#fff'};cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.15s;margin-top:1px;">
+              ${task.done?`<svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`:''}
+            </button>
+            <div class="task-body" data-id="${task.id}" style="flex:1;min-width:0;cursor:pointer;">
+              <div style="font-size:15px;color:${task.done?'#9ca3af':'#111827'};text-decoration:${task.done?'line-through':'none'};line-height:1.5;word-break:break-word;">${esc(task.text)}</div>
+              ${hasNotes?`<div style="font-size:12px;color:#b0b7c3;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">📝 ${esc(task.notes)}</div>`:''}
+              <div style="display:flex;align-items:center;gap:8px;margin-top:5px;">
+                <span style="font-size:11px;font-weight:600;color:${color};background:${bg};padding:2px 7px;border-radius:10px;">${getPriority(task.priority).label}</span>
+                ${task.carriedFrom?`<span style="font-size:11px;color:#a78bfa;background:#f5f3ff;padding:2px 7px;border-radius:10px;font-weight:500;">↩ ${task.carriedFrom.slice(5)} 延续</span>`:''}
+                <span style="font-size:11px;color:#d1d5db;">${task.createdAt||''}</span>
+              </div>
+            </div>
+            <div class="task-body" data-id="${task.id}" style="color:#d1d5db;font-size:20px;align-self:center;cursor:pointer;padding-left:4px;user-select:none;">›</div>
+          </div>`;
+        }).join('')}
+      </div>
+      ${tasks.length>0?`<div style="margin-top:28px;text-align:center;font-size:12px;color:#d1d5db;">共 ${tasks.length} 项任务　·　已完成 ${doneCount} 项　·　剩余 ${tasks.length-doneCount} 项</div>`:''}
+    </div>`:''}
+
+    <!-- ══ NOTES TAB ══ -->
+    ${activeTab==='notes'?`
+    <div style="margin-top:20px;">
+      <!-- New note button -->
+      <button id="btn-new-note" style="width:100%;padding:12px;border-radius:12px;border:1.5px dashed #d1d5db;background:transparent;color:#6b7280;font-size:14px;font-weight:500;cursor:pointer;margin-bottom:16px;transition:all 0.15s;">
+        + 新建笔记
+      </button>
+
+      <!-- Note list -->
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        ${notes.length===0?`<div style="text-align:center;color:#d1d5db;padding:40px 0;font-size:14px;">今天还没有笔记，点上方新建一条 ✍️</div>`:''}
+        ${notes.map((note,i)=>`
+        <div class="note-card" data-note-id="${note.id}">
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:6px;">
+            <div style="font-size:15px;font-weight:600;color:#111827;line-height:1.4;flex:1;">${esc(note.title)||'<span style="color:#d1d5db;font-weight:400;">无标题</span>'}</div>
+            <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+              <span style="font-size:11px;color:#d1d5db;">${note.createdAt||''}</span>
+              <button class="note-delete-btn" data-note-id="${note.id}" style="width:24px;height:24px;border-radius:6px;border:none;background:#fff5f5;color:#fca5a5;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;">×</button>
+            </div>
+          </div>
+          ${note.content?`<div style="font-size:13px;color:#6b7280;line-height:1.6;white-space:pre-wrap;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;">${esc(note.content)}</div>`:'<div style="font-size:13px;color:#d1d5db;">空笔记，点击编辑…</div>'}
+          ${note.tag?`<div style="margin-top:8px;"><span style="font-size:11px;font-weight:500;color:${getNoteTagColor(note.tag).color};background:${getNoteTagColor(note.tag).bg};padding:2px 8px;border-radius:10px;">${note.tag}</span></div>`:''}
+        </div>`).join('')}
+      </div>
+    </div>`:''}
+
+  </div>
+
+  <!-- TASK DRAWER -->
+  ${selectedTask?renderTaskDrawer(selectedTask):''}
+
+  <!-- NOTE DRAWER -->
+  ${selectedNote?renderNoteDrawer(selectedNote):''}
+  `;
+
+  bindEvents();
+}
+
+// ── Note tag colors ───────────────────────────────────────────────────────────
+const NOTE_TAGS=['会议纪要','工作总结','待跟进','想法','其他'];
+function getNoteTagColor(tag){
+  const map={'会议纪要':{color:'#3b82f6',bg:'#eff6ff'},'工作总结':{color:'#10b981',bg:'#f0fdf4'},'待跟进':{color:'#f59e0b',bg:'#fffbeb'},'想法':{color:'#a78bfa',bg:'#f5f3ff'},'其他':{color:'#6b7280',bg:'#f9fafb'}};
+  return map[tag]||{color:'#6b7280',bg:'#f9fafb'};
+}
+
+// ── Drawers ───────────────────────────────────────────────────────────────────
+function renderTaskDrawer(task){
+  return`<div class="drawer-backdrop" id="drawer-backdrop"></div>
+  <div class="drawer">
+    <div style="padding:20px 24px 16px;border-bottom:1px solid #f3f4f6;display:flex;align-items:center;justify-content:space-between;">
+      <span style="font-size:13px;color:#9ca3af;font-weight:500;">任务详情</span>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button id="drawer-save" style="padding:5px 14px;border-radius:20px;border:none;background:#111827;color:#fff;font-size:12px;font-weight:600;cursor:pointer;">保存</button>
+        <button id="drawer-close" style="width:30px;height:30px;border-radius:8px;border:none;background:#f3f4f6;cursor:pointer;font-size:18px;color:#6b7280;">×</button>
+      </div>
+    </div>
+    <div style="flex:1;overflow-y:auto;padding:24px;">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:22px;">
+        <button id="drawer-toggle" style="width:26px;height:26px;border-radius:8px;flex-shrink:0;border:2px solid ${task.done?'#10b981':'#d1d5db'};background:${task.done?'#10b981':'#fff'};cursor:pointer;display:flex;align-items:center;justify-content:center;">
+          ${task.done?`<svg width="13" height="13" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`:''}
+        </button>
+        <span style="font-size:13px;font-weight:500;color:${task.done?'#10b981':'#9ca3af'};">${task.done?'✓ 已完成':'待完成'}</span>
+        ${task.carriedFrom?`<span style="font-size:11px;color:#a78bfa;background:#f5f3ff;padding:2px 8px;border-radius:10px;font-weight:500;">↩ 延续自 ${task.carriedFrom}</span>`:''}
+      </div>
+      <div style="margin-bottom:20px;">
+        <label style="font-size:11px;color:#9ca3af;font-weight:600;letter-spacing:1px;text-transform:uppercase;display:block;margin-bottom:6px;">任务标题</label>
+        <textarea id="drawer-text" rows="2" style="width:100%;border:1.5px solid #e5e7eb;border-radius:10px;padding:10px 12px;font-size:15px;color:#111827;line-height:1.6;resize:none;outline:none;background:#fafaf8;">${esc(task.text)}</textarea>
+      </div>
+      <div style="margin-bottom:20px;">
+        <label style="font-size:11px;color:#9ca3af;font-weight:600;letter-spacing:1px;text-transform:uppercase;display:block;margin-bottom:8px;">优先级</label>
+        <div style="display:flex;gap:8px;">
+          ${['high','mid','low'].map(p=>{const{label,color}=getPriority(p);const a=task.priority===p;return`<button class="drawer-prio" data-p="${p}" style="padding:6px 14px;border-radius:20px;border:1.5px solid ${a?color:'#e5e7eb'};background:${a?color:'#fff'};color:${a?'#fff':'#6b7280'};font-size:12px;font-weight:500;cursor:pointer;">${label}</button>`;}).join('')}
+        </div>
+      </div>
+      <div style="margin-bottom:24px;">
+        <label style="font-size:11px;color:#9ca3af;font-weight:600;letter-spacing:1px;text-transform:uppercase;display:block;margin-bottom:6px;">备注 / 补充信息</label>
+        <textarea id="drawer-notes" rows="8" placeholder="相关信息、链接、注意事项、进展记录…"
+          style="width:100%;border:1.5px solid #e5e7eb;border-radius:10px;padding:12px;font-size:14px;color:#374151;line-height:1.7;resize:vertical;outline:none;background:#fafaf8;">${esc(task.notes||'')}</textarea>
+      </div>
+      <div style="font-size:12px;color:#d1d5db;line-height:2.2;">
+        <div>🕐 添加时间：${task.createdAt||''}</div>
+        ${task.carriedFrom?`<div>📅 来自日期：${task.carriedFrom}</div>`:''}
+      </div>
+    </div>
+    <div style="padding:16px 24px;border-top:1px solid #f3f4f6;display:flex;justify-content:space-between;align-items:center;">
+      <button id="drawer-delete" style="padding:8px 16px;border-radius:10px;border:1.5px solid #fca5a5;background:transparent;color:#ef4444;font-size:13px;font-weight:500;cursor:pointer;">删除任务</button>
+      <button id="drawer-save2" style="padding:8px 24px;border-radius:10px;border:none;background:#111827;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">保存更改</button>
+    </div>
+  </div>`;
+}
+
+function renderNoteDrawer(note){
+  return`<div class="drawer-backdrop" id="note-backdrop"></div>
+  <div class="drawer">
+    <div style="padding:20px 24px 16px;border-bottom:1px solid #f3f4f6;display:flex;align-items:center;justify-content:space-between;">
+      <span style="font-size:13px;color:#9ca3af;font-weight:500;">编辑笔记</span>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button id="note-save" style="padding:5px 14px;border-radius:20px;border:none;background:#111827;color:#fff;font-size:12px;font-weight:600;cursor:pointer;">保存</button>
+        <button id="note-close" style="width:30px;height:30px;border-radius:8px;border:none;background:#f3f4f6;cursor:pointer;font-size:18px;color:#6b7280;">×</button>
+      </div>
+    </div>
+    <div style="flex:1;overflow-y:auto;padding:24px;display:flex;flex-direction:column;gap:16px;">
+      <div>
+        <label style="font-size:11px;color:#9ca3af;font-weight:600;letter-spacing:1px;text-transform:uppercase;display:block;margin-bottom:6px;">标题</label>
+        <input id="note-title" type="text" value="${esc(note.title||'')}" placeholder="会议纪要、工作总结…"
+          style="width:100%;border:1.5px solid #e5e7eb;border-radius:10px;padding:10px 12px;font-size:15px;color:#111827;outline:none;background:#fafaf8;"/>
+      </div>
+      <div>
+        <label style="font-size:11px;color:#9ca3af;font-weight:600;letter-spacing:1px;text-transform:uppercase;display:block;margin-bottom:8px;">分类标签</label>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          ${NOTE_TAGS.map(tag=>{const{color,bg}=getNoteTagColor(tag);const a=note.tag===tag;return`<button class="note-tag-btn" data-tag="${tag}" style="padding:4px 12px;border-radius:20px;border:1.5px solid ${a?color:'#e5e7eb'};background:${a?bg:'#fff'};color:${a?color:'#6b7280'};font-size:12px;font-weight:500;cursor:pointer;">${tag}</button>`;}).join('')}
+        </div>
+      </div>
+      <div style="flex:1;">
+        <label style="font-size:11px;color:#9ca3af;font-weight:600;letter-spacing:1px;text-transform:uppercase;display:block;margin-bottom:6px;">内容</label>
+        <textarea id="note-content" placeholder="在这里记录会议要点、决策、行动项、工作总结…"
+          style="width:100%;min-height:320px;border:1.5px solid #e5e7eb;border-radius:10px;padding:12px;font-size:14px;color:#374151;line-height:1.8;resize:vertical;outline:none;background:#fafaf8;">${esc(note.content||'')}</textarea>
+      </div>
+      <div style="font-size:12px;color:#d1d5db;">🕐 创建时间：${note.createdAt||timeNow()}</div>
+    </div>
+    <div style="padding:16px 24px;border-top:1px solid #f3f4f6;display:flex;justify-content:space-between;align-items:center;">
+      <button id="note-delete" style="padding:8px 16px;border-radius:10px;border:1.5px solid #fca5a5;background:transparent;color:#ef4444;font-size:13px;font-weight:500;cursor:pointer;">删除笔记</button>
+      <button id="note-save2" style="padding:8px 24px;border-radius:10px;border:none;background:#111827;color:#fff;font-size:13px;font-weight:600;cursor:pointer;">保存笔记</button>
+    </div>
+  </div>`;
+}
+
+// ── Event binding ─────────────────────────────────────────────────────────────
+function bindEvents(){
+  const todayKey=getTodayKey(), isToday=viewKey===todayKey;
+
+  // Date nav
+  document.getElementById('btn-prev')?.addEventListener('click',()=>{viewKey=shiftDay(viewKey,-1);render();});
+  document.getElementById('btn-next')?.addEventListener('click',()=>{const n=shiftDay(viewKey,1);if(n<=todayKey){viewKey=n;render();}});
+  document.getElementById('btn-today')?.addEventListener('click',()=>{viewKey=todayKey;render();});
+  document.getElementById('btn-datepicker')?.addEventListener('click',()=>{showDatePicker=!showDatePicker;render();});
+  document.getElementById('date-input')?.addEventListener('change',e=>{if(e.target.value){viewKey=e.target.value;showDatePicker=false;render();}});
+
+  // Tabs
+  document.getElementById('tab-tasks')?.addEventListener('click',()=>{activeTab='tasks';render();});
+  document.getElementById('tab-notes')?.addEventListener('click',()=>{activeTab='notes';render();});
+
+  // Task input
+  const ti=document.getElementById('task-input');
+  if(ti){ti.focus();ti.addEventListener('input',e=>{inputText=e.target.value;});ti.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();addTask();}});}
+  document.querySelectorAll('.prio-btn').forEach(b=>b.addEventListener('click',()=>{inputPriority=b.dataset.p;render();document.getElementById('task-input')?.focus();}));
+  document.getElementById('btn-add')?.addEventListener('click',addTask);
+  document.querySelectorAll('.filter-btn').forEach(b=>b.addEventListener('click',()=>{taskFilter=b.dataset.f;render();}));
+  document.getElementById('btn-clear')?.addEventListener('click',()=>{updateTasks(t=>t.filter(t=>!t.done));render();});
+
+  // Task cards
+  document.querySelectorAll('.check-btn').forEach(b=>b.addEventListener('click',e=>{e.stopPropagation();toggleDone(b.dataset.id);}));
+  document.querySelectorAll('.task-body').forEach(b=>b.addEventListener('click',()=>{if(!dragState){const t=(allTasks[viewKey]||[]).find(t=>String(t.id)===String(b.dataset.id));if(t){selectedTask=t;render();}}}));
+  if(isToday) document.querySelectorAll('.drag-handle').forEach(h=>h.addEventListener('pointerdown',e=>{e.preventDefault();startDrag(e,h.dataset.drag);}));
+
+  // Task drawer
+  document.getElementById('drawer-backdrop')?.addEventListener('click',()=>{selectedTask=null;render();});
+  document.getElementById('drawer-close')?.addEventListener('click',()=>{selectedTask=null;render();});
+  document.getElementById('drawer-toggle')?.addEventListener('click',()=>{toggleDone(selectedTask.id);selectedTask=(allTasks[viewKey]||[]).find(t=>t.id===selectedTask.id);render();});
+  document.getElementById('drawer-delete')?.addEventListener('click',()=>{deleteTask(selectedTask.id);selectedTask=null;render();});
+  document.querySelectorAll('.drawer-prio').forEach(b=>b.addEventListener('click',()=>{selectedTask={...selectedTask,priority:b.dataset.p};render();}));
+  const saveTask=()=>{
+    const text=document.getElementById('drawer-text')?.value.trim();
+    const notes=document.getElementById('drawer-notes')?.value||'';
+    if(text){updateTasks(tasks=>tasks.map(t=>t.id===selectedTask.id?{...t,text,notes,priority:selectedTask.priority}:t));selectedTask={...selectedTask,text,notes};}
+    render();
+  };
+  document.getElementById('drawer-save')?.addEventListener('click',saveTask);
+  document.getElementById('drawer-save2')?.addEventListener('click',saveTask);
+
+  // Notes tab
+  document.getElementById('btn-new-note')?.addEventListener('click',()=>{
+    const note={id:uid(),title:'',content:'',tag:'',createdAt:timeNow()};
+    allNotes[viewKey]=[note,...(allNotes[viewKey]||[])];
+    saveNotes(allNotes);
+    selectedNote=note;
+    render();
+  });
+  document.querySelectorAll('.note-card').forEach(card=>{
+    card.addEventListener('click',e=>{
+      if(e.target.closest('.note-delete-btn'))return;
+      const note=(allNotes[viewKey]||[]).find(n=>String(n.id)===String(card.dataset.noteId));
+      if(note){selectedNote=note;render();}
+    });
+  });
+  document.querySelectorAll('.note-delete-btn').forEach(b=>b.addEventListener('click',e=>{
+    e.stopPropagation();
+    allNotes[viewKey]=(allNotes[viewKey]||[]).filter(n=>String(n.id)!==String(b.dataset.noteId));
+    saveNotes(allNotes);render();
+  }));
+
+  // Note drawer
+  document.getElementById('note-backdrop')?.addEventListener('click',saveAndCloseNote);
+  document.getElementById('note-close')?.addEventListener('click',saveAndCloseNote);
+  document.getElementById('note-save')?.addEventListener('click',saveAndCloseNote);
+  document.getElementById('note-save2')?.addEventListener('click',saveAndCloseNote);
+  document.getElementById('note-delete')?.addEventListener('click',()=>{
+    allNotes[viewKey]=(allNotes[viewKey]||[]).filter(n=>n.id!==selectedNote.id);
+    saveNotes(allNotes);selectedNote=null;render();
+  });
+  document.querySelectorAll('.note-tag-btn').forEach(b=>b.addEventListener('click',()=>{
+    const newTag=selectedNote.tag===b.dataset.tag?'':b.dataset.tag;
+    selectedNote={...selectedNote,tag:newTag};render();
+  }));
+}
+
+function saveAndCloseNote(){
+  if(!selectedNote)return;
+  const title=document.getElementById('note-title')?.value||'';
+  const content=document.getElementById('note-content')?.value||'';
+  allNotes[viewKey]=(allNotes[viewKey]||[]).map(n=>n.id===selectedNote.id?{...n,title,content,tag:selectedNote.tag}:n);
+  saveNotes(allNotes);selectedNote=null;render();
+}
+
+// ── Task ops ──────────────────────────────────────────────────────────────────
+function updateTasks(fn){allTasks[viewKey]=fn(allTasks[viewKey]||[]);saveTasks(allTasks);}
+function addTask(){const text=inputText.trim();if(!text)return;updateTasks(tasks=>[...tasks,{id:uid(),text,priority:inputPriority,done:false,notes:'',createdAt:timeNow()}]);inputText='';render();}
+function toggleDone(id){updateTasks(tasks=>tasks.map(t=>String(t.id)===String(id)?{...t,done:!t.done}:t));if(selectedTask&&String(selectedTask.id)===String(id))selectedTask={...selectedTask,done:!selectedTask.done};render();}
+function deleteTask(id){updateTasks(tasks=>tasks.filter(t=>String(t.id)!==String(id)));}
+
+// ── Drag ──────────────────────────────────────────────────────────────────────
+function startDrag(e,taskIdStr){
+  const tasks=allTasks[viewKey]||[];
+  const taskId=tasks.find(t=>String(t.id)===taskIdStr)?.id;
+  if(!taskId)return;
+  const fromIndex=tasks.findIndex(t=>t.id===taskId);
+  dragState={id:taskId,fromIndex,overIndex:fromIndex};render();
+  const onMove=me=>{
+    const clientY=me.touches?me.touches[0].clientY:me.clientY;
+    const cards=document.querySelectorAll('.task-card');
+    let closest=fromIndex,closestDist=Infinity;
+    cards.forEach(card=>{const rect=card.getBoundingClientRect();const mid=rect.top+rect.height/2;const dist=Math.abs(clientY-mid);const idx=parseInt(card.dataset.idx);if(dist<closestDist&&!isNaN(idx)){closestDist=dist;closest=idx;}});
+    if(dragState&&dragState.overIndex!==closest){dragState.overIndex=closest;render();}
+  };
+  const onUp=()=>{
+    if(dragState&&dragState.fromIndex!==dragState.overIndex){
+      updateTasks(tasks=>{const next=[...tasks];const[moved]=next.splice(dragState.fromIndex,1);next.splice(dragState.overIndex,0,moved);return next;});
+    }
+    dragState=null;render();
+    window.removeEventListener('pointermove',onMove);window.removeEventListener('pointerup',onUp);
+  };
+  window.addEventListener('pointermove',onMove);window.addEventListener('pointerup',onUp);
+}
+
+render();
+</script>
+</body>
+</html>
